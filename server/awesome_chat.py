@@ -48,8 +48,7 @@ if not config["debug"]:
     handler.setLevel(logging.INFO)
 logger.addHandler(handler)
 
-log_file = config["log_file"]
-if log_file:
+if log_file := config["log_file"]:
     filehandler = logging.FileHandler(log_file)
     filehandler.setLevel(logging.DEBUG)
     filehandler.setFormatter(formatter)
@@ -69,13 +68,12 @@ choose_model_highlight_ids = get_token_ids_for_choose_model(LLM_encoding)
 # /v1/chat/completions	gpt-4, gpt-4-0314, gpt-4-32k, gpt-4-32k-0314, gpt-3.5-turbo, gpt-3.5-turbo-0301	
 # /v1/completions	text-davinci-003, text-davinci-002, text-curie-001, text-babbage-001, text-ada-001, davinci, curie, babbage, ada
 
-if use_completion:
-    api_name = "completions"
-else:
-    api_name = "chat/completions"
-
+api_name = "completions" if use_completion else "chat/completions"
 if not config["dev"]:
-    if not config["openai"]["key"].startswith("sk-") and not config["openai"]["key"]=="gradio":
+    if (
+        not config["openai"]["key"].startswith("sk-")
+        and config["openai"]["key"] != "gradio"
+    ):
         raise ValueError("Incrorrect OpenAI key. Please check your config.yaml file.")
     OPENAI_KEY = config["openai"]["key"]
     endpoint = f"https://api.openai.com/v1/{api_name}"
@@ -86,12 +84,13 @@ else:
     endpoint = f"{config['local']['endpoint']}/v1/{api_name}"
     HEADER = None
 
-PROXY = None
-if config["proxy"]:
-    PROXY = {
+PROXY = (
+    {
         "https": config["proxy"],
     }
-
+    if config["proxy"]
+    else None
+)
 inference_mode = config["inference_mode"]
 
 HTTP_Server = "http://" + config["httpserver"]["host"] + ":" + str(config["httpserver"]["port"])
@@ -101,7 +100,7 @@ Model_Server = "http://" + config["modelserver"]["host"] + ":" + str(config["mod
 if inference_mode!="huggingface":
     message = "The server of local inference endpoints is not running, please start it first. (or using `inference_mode: huggingface` in config.yaml for a feature-limited experience)"
     try:
-        r = requests.get(Model_Server + "/running")
+        r = requests.get(f"{Model_Server}/running")
         if r.status_code != 200:
             raise ValueError(message)
     except:
@@ -127,10 +126,7 @@ for model in MODELS:
     if tag not in MODELS_MAP:
         MODELS_MAP[tag] = []
     MODELS_MAP[tag].append(model)
-METADATAS = {}
-for model in MODELS:
-    METADATAS[model["id"]] = model
-
+METADATAS = {model["id"]: model for model in MODELS}
 HUGGINGFACE_HEADERS = {}
 if config["huggingface"]["token"]:
     HUGGINGFACE_HEADERS = {
@@ -152,7 +148,7 @@ def convert_chat_to_completion(data):
         else:
             final_prompt += ("<im_start>"+ "system" + "\n" + message['content'] + "<im_end>\n")
     final_prompt = tprompt + final_prompt
-    final_prompt = final_prompt + "<im_start>assistant"
+    final_prompt = f"{final_prompt}<im_start>assistant"
     data["prompt"] = final_prompt
     data['stop'] = data.get('stop', ["<im_end>"])
     data['max_tokens'] = data.get('max_tokens', max(get_max_context_length(LLM) - count_tokens(LLM_encoding, final_prompt), 1))
@@ -186,8 +182,7 @@ def find_json(s):
     start = s.find("{")
     end = s.rfind("}")
     res = s[start:end+1]
-    res = res.replace("\n", "")
-    return res
+    return res.replace("\n", "")
 
 def field_extract(s, field):
     try:
@@ -217,15 +212,11 @@ def image_to_bytes(img_url):
     img_byte = io.BytesIO()
     type = img_url.split(".")[-1]
     load_image(img_url).save(img_byte, format="png")
-    img_data = img_byte.getvalue()
-    return img_data
+    return img_byte.getvalue()
 
 def resource_has_dep(command):
     args = command["args"]
-    for _, v in args.items():
-        if "<GENERATED>" in v:
-            return True
-    return False
+    return any("<GENERATED>" in v for _, v in args.items())
 
 def fix_dep(tasks):
     for task in tasks:
@@ -354,7 +345,7 @@ def response_results(input, results, openaikey=None):
 def huggingface_model_inference(model_id, data, task):
     task_url = f"https://api-inference.huggingface.co/models/{model_id}" # InferenceApi does not yet support some tasks
     inference = InferenceApi(repo_id=model_id, token=config["huggingface"]["token"])
-    
+
     # NLP tasks
     if task == "question-answering":
         inputs = {"question": data["text"], "context": (data["context"] if "context" in data else "" )}
@@ -365,19 +356,18 @@ def huggingface_model_inference(model_id, data, task):
     if task in ["text-classification",  "token-classification", "text2text-generation", "summarization", "translation", "conversational", "text-generation"]:
         inputs = data["text"]
         result = inference(inputs)
-    
+
     # CV tasks
-    if task == "visual-question-answering" or task == "document-question-answering":
+    if task in ["visual-question-answering", "document-question-answering"]:
         img_url = data["image"]
         text = data["text"]
         img_data = image_to_bytes(img_url)
         img_base64 = base64.b64encode(img_data).decode("utf-8")
-        json_data = {}
-        json_data["inputs"] = {}
+        json_data = {"inputs": {}}
         json_data["inputs"]["question"] = text
         json_data["inputs"]["image"] = img_base64
         result = requests.post(task_url, headers=HUGGINGFACE_HEADERS, json=json_data).json()
-        # result = inference(inputs) # not support
+            # result = inference(inputs) # not support
 
     if task == "image-to-image":
         img_url = data["image"]
@@ -388,7 +378,7 @@ def huggingface_model_inference(model_id, data, task):
         result = r.json()
         if "path" in result:
             result["generated image"] = result.pop("path")
-    
+
     if task == "text-to-image":
         inputs = data["text"]
         img = inference(inputs)
@@ -402,9 +392,15 @@ def huggingface_model_inference(model_id, data, task):
         img_data = image_to_bytes(img_url)
         image = Image.open(BytesIO(img_data))
         predicted = inference(data=img_data)
-        colors = []
-        for i in range(len(predicted)):
-            colors.append((random.randint(100, 255), random.randint(100, 255), random.randint(100, 255), 155))
+        colors = [
+            (
+                random.randint(100, 255),
+                random.randint(100, 255),
+                random.randint(100, 255),
+                155,
+            )
+            for _ in range(len(predicted))
+        ]
         for i, pred in enumerate(predicted):
             label = pred["label"]
             mask = pred.pop("mask").encode("utf-8")
@@ -426,7 +422,7 @@ def huggingface_model_inference(model_id, data, task):
         predicted = inference(data=img_data)
         image = Image.open(BytesIO(img_data))
         draw = ImageDraw.Draw(image)
-        labels = list(item['label'] for item in predicted)
+        labels = [item['label'] for item in predicted]
         color_map = {}
         for label in labels:
             if label not in color_map:
@@ -445,7 +441,7 @@ def huggingface_model_inference(model_id, data, task):
         img_url = data["image"]
         img_data = image_to_bytes(img_url)
         result = inference(data=img_data)
- 
+
     if task == "image-to-text":
         img_url = data["image"]
         img_data = image_to_bytes(img_url)
@@ -454,7 +450,7 @@ def huggingface_model_inference(model_id, data, task):
         result = {}
         if "generated_text" in r.json()[0]:
             result["generated text"] = r.json()[0].pop("generated_text")
-    
+
     # AUDIO tasks
     if task == "text-to-speech":
         inputs = data["text"]
@@ -475,7 +471,7 @@ def huggingface_model_inference(model_id, data, task):
             for k, v in result[0].items():
                 if k == "blob":
                     content = base64.b64decode(v.encode("utf-8"))
-                if k == "content-type":
+                elif k == "content-type":
                     type = "audio/flac".split("/")[-1]
             audio = AudioSegment.from_file(BytesIO(content))
             name = str(uuid.uuid4())[:4]
@@ -485,7 +481,7 @@ def huggingface_model_inference(model_id, data, task):
 
 def local_model_inference(model_id, data, task):
     task_url = f"{Model_Server}/models/{model_id}"
-    
+
     # contronlet
     if model_id.startswith("lllyasviel/sd-controlnet-"):
         img_url = data["image"]
@@ -502,7 +498,7 @@ def local_model_inference(model_id, data, task):
         if "path" in results:
             results["generated image"] = results.pop("path")
         return results
-        
+
     if task == "text-to-video":
         response = requests.post(task_url, json=data)
         results = response.json()
@@ -511,7 +507,7 @@ def local_model_inference(model_id, data, task):
         return results
 
     # NLP tasks
-    if task == "question-answering" or task == "sentence-similarity":
+    if task in ["question-answering", "sentence-similarity"]:
         response = requests.post(task_url, json=data)
         return response.json()
     if task in ["text-classification",  "token-classification", "text2text-generation", "summarization", "translation", "conversational", "text-generation"]:
@@ -553,7 +549,7 @@ def local_model_inference(model_id, data, task):
             return predicted
         image = load_image(img_url)
         draw = ImageDraw.Draw(image)
-        labels = list(item['label'] for item in predicted)
+        labels = [item['label'] for item in predicted]
         color_map = {}
         for label in labels:
             if label not in color_map:
@@ -570,9 +566,7 @@ def local_model_inference(model_id, data, task):
         return results
     if task in ["image-classification", "image-to-text", "document-question-answering", "visual-question-answering"]:
         img_url = data["image"]
-        text = None
-        if "text" in data:
-            text = data["text"]
+        text = data["text"] if "text" in data else None
         response = requests.post(task_url, json={"img_url": img_url, "text": text})
         results = response.json()
         return results
@@ -593,13 +587,13 @@ def model_inference(model_id, data, hosted_on, task):
     if hosted_on == "unknown":
         localStatusUrl = f"{Model_Server}/status/{model_id}"
         r = requests.get(localStatusUrl)
-        logger.debug("Local Server Status: " + str(r.json()))
+        logger.debug(f"Local Server Status: {str(r.json())}")
         if r.status_code == 200 and "loaded" in r.json() and r.json()["loaded"]:
             hosted_on = "local"
         else:
             huggingfaceStatusUrl = f"https://api-inference.huggingface.co/status/{model_id}"
             r = requests.get(huggingfaceStatusUrl, headers=HUGGINGFACE_HEADERS, proxies=PROXY)
-            logger.debug("Huggingface Status: " + str(r.json()))
+            logger.debug(f"Huggingface Status: {str(r.json())}")
             if r.status_code == 200 and "loaded" in r.json() and r.json()["loaded"]:
                 hosted_on = "huggingface"
     try:
@@ -664,9 +658,11 @@ def get_avaliable_models(candidates, topk=5):
     return all_available_models
 
 def collect_result(command, choose, inference_result):
-    result = {"task": command}
-    result["inference result"] = inference_result
-    result["choose model result"] = choose
+    result = {
+        "task": command,
+        "inference result": inference_result,
+        "choose model result": choose,
+    }
     logger.debug(f"inference result: {inference_result}")
     return result
 
